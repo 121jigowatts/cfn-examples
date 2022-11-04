@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Set up for S3 static website hosting with basic auth
+
+# ------------------------------------------------------------#
+#  Input Parameter
+# ------------------------------------------------------------#
+Parameters:
+  BucketName:
+    Description: Name of this backet name.
+    Type: String
+
+Resources:
+  # ------------------------------------------------------------#
+  #  S3 Bucket
+  # ------------------------------------------------------------#
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: System
+          Value: sample
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action: s3:GetObject
+            Condition:
+              StringEquals:
+                AWS:SourceArn:
+                  - !Join
+                    - /
+                    - - !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution
+                      - !Ref CloudFrontDistribution
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudfront.amazonaws.com
+            Resource: !Sub arn:aws:s3:::${S3Bucket}/*
+            Sid: AllowCloudFrontServicePrincipalReadOnly
+
+  # ------------------------------------------------------------#
+  #  CloudFront
+  # ------------------------------------------------------------#
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: !Sub origin-${S3Bucket}
+            DomainName: !GetAtt S3Bucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: !Sub origin-${S3Bucket}
+          Compress: true
+          ViewerProtocolPolicy: allow-all
+          # https://docs.aws.amazon.com/ja_jp/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          AllowedMethods:
+            - DELETE
+            - GET
+            - HEAD
+            - OPTIONS
+            - PATCH
+            - POST
+            - PUT
+          CachedMethods:
+            - GET
+            - HEAD
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt BasicAuthFunction.FunctionMetadata.FunctionARN
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_All
+      Tags:
+        - Key: System
+          Value: sample
+
+  # Origin Access Control(OAC)
+  CloudFrontOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: OAC for S3 Bucket
+        Name: origin-access-control-name
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # basic auth
+  BasicAuthFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: basic-auth
+      FunctionConfig:
+        Comment: Set up basic authentication
+        Runtime: cloudfront-js-1.0
+      AutoPublish: true
+      FunctionCode: !Sub |
+        function handler(event) {
+          var request = event.request;
+          var headers = request.headers;
+
+          // echo -n user:pass | base64
+          var authString = "Basic dXNlcjpwYXNz";
+
+          if (
+            typeof headers.authorization === "undefined" ||
+            headers.authorization.value !== authString
+          ) {
+            return {
+              statusCode: 401,
+              statusDescription: "Unauthorized",
+              headers: { "www-authenticate": { value: "Basic" } }
+            };
+          }
+
+          return request;
+        }
